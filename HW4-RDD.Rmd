@@ -1,0 +1,561 @@
+---
+title: "Predicting The Probability Of A Car Crash And It's Cost"
+author: "Umer Farooq"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::readthedown:
+    highlight: kate
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(glmnet)
+library(mice)
+library(psych)
+library(pROC)
+library(caret)
+library(devtools)
+library(nnet)
+library(MASS)
+library(faraway)
+library(corrplot)
+library(DataExplorer)
+
+
+```
+
+## INTRODUCTION:
+
+In this study, we will explore, analyze and model a data set containing approximately 8000 records representing a customer at an auto insurance company. Each record has two response variables. The first response variable, TARGET_FLAG, is a 1 or a 0. A “1” means that the person was in a car crash. A zero means that the person was not in a car crash. The second response variable is TARGET_AMT. This value is zero if the person did not crash their car. But if they did crash their car, this number will be a value greater than zero.
+
+Our objective is to build multiple linear regression and binary logistic regression models on the training data to predict the probability that a person will crash their car and also the amount of money it will cost if the person does crash their car. You can only use the variables given to you (or variables that you derive from the variables provided). Below is a short description of the variables of interest in the data set:
+
+```{r echo=FALSE}
+knitr::include_graphics("https://raw.githubusercontent.com/Umerfarooq122/predicting-the-probability-that-a-person-will-crash-their-car-and-also-the-amount-cost/main/Screenshot%202023-11-29%20at%202.51.23%20PM.png")
+```
+
+
+## 1. DATA EXPLORATION:
+
+In this section we load and explore the training data set. We will try get familiarize ourselves with different variables i.e. dependent and independent variables, and check out their distributions. The problem at hand is about the car crashes, insurance and the associated cost which indicates that we will be dealing with a lot of variables since these kind of problems are dependent on multiple factors. So before any further due let's begin by loading the data set.
+
+### Loading The Training Dataset:
+
+Below code chunk loads the required data set that we can use to train our model.
+
+```{r}
+training <- read.csv("https://raw.githubusercontent.com/Umerfarooq122/predicting-the-probability-that-a-person-will-crash-their-car-and-also-the-amount-cost/main/insurance_training_data.csv")
+```
+
+Let's display the fist five row of the data set to check if everything has been loaded into our work environment correctly:
+
+```{r}
+knitr::kable(head(training))
+```
+
+### Checking Out The Dimensions, Desciptive Summary And Distributions:
+
+As we can see that we have got all the columns that are mentioned in the introduction about data set. Let's check out the dimension of the data set
+
+```{r}
+dim(training)
+```
+
+As we can see that we have got 26 columns in total and 8161 observations. One of those columns in an index column and we usually do not need it for the analysis so lets remove that from our data set.
+
+```{r}
+training <- training[-1]
+```
+
+Let's quickly peek into the descriptive summary of our data set
+
+```{r}
+knitr::kable(describe(training))
+```
+
+Before moving on to the data preparation for our models lets check out the distribution of our continuous variable using histogram and categorical variables using bar plot
+
+```{r, echo=FALSE, warning=FALSE , message=FALSE}
+
+out <- split_columns(training)
+plot_histogram(out$continuous)
+plot_bar(out$discrete)
+```
+
+We can see that the data set is imbalance since our target variable for logistic regression `TARGET_FLAG` does not have equal number of positive and negative responses. Variables like `PARENT1`,`REVOKED`,`RED_CAR` and `URBANICITY` are also imbalance and might be not be a good predictor but we will further investigate. Similarly, apart from `AGE` other continuous variables are not normal distributed but in our first which which will be logistic regression so it is not going to be an issue since logistic regression does not assume that the continuous independent variables are normally distributed. Logistic regression is a type of regression analysis that is designed for predicting the probability of an event occurring, and it makes no assumptions about the distribution of the independent variables.
+
+
+Before we go further ahead with data preparation we can quickly check out if our data set has any missing values and if Yes then which variables contains how many missing values.
+
+```{r}
+knitr::kable(colSums(is.na(training)))
+```
+
+As we can see that columns or variables like `AGE`,`YOJ` and `CAR_AGE` contains missing values which needs to be fixed but before jumping into fixing the mixing values let's take a look at the structure of the data and see the data type of each column.
+
+```{r}
+
+str(training)
+```
+
+As we can see that a lot of data has number and ideally should be a numeric data type but because of symbols like `$` and `,` so R read it as character data type so that needs to be addressed.
+
+## 2. DATA PREPARATION
+
+
+In this section we will prepare our data for logistic regression model. First we will convert those character data type variables into numeric which has numbers in them.
+
+```{r}
+
+training$INCOME <- parse_number(training$INCOME)
+training$HOME_VAL <- parse_number(training$HOME_VAL)
+training$BLUEBOOK <- parse_number(training$BLUEBOOK)
+training$OLDCLAIM <- parse_number(training$OLDCLAIM)
+```
+
+Now that we have changed those columns now we can set the data type for other character and convert them into factors which a much more acceptable data type when it comes to logistic regression.
+
+```{r}
+training$PARENT1 <- as.factor(training$PARENT1)
+training$MSTATUS <- as.factor(training$MSTATUS)
+training$SEX <- as.factor(training$SEX)
+training$EDUCATION <- as.factor(training$EDUCATION)
+levels(training$EDUCATION) <- c('<High School','z_High School','Bachelors', 'Masters','PHD')
+training$CAR_USE <- as.factor(training$CAR_USE)
+training$CAR_TYPE <- as.factor(training$CAR_TYPE)
+training$RED_CAR <- as.factor(training$RED_CAR)
+training$REVOKED <- as.factor(training$REVOKED)
+training$URBANICITY <- as.factor(training$URBANICITY)
+training$JOB[training$JOB==""]<- NA
+training$JOB <- as.factor(training$JOB)
+training$TARGET_FLAG <- as.factor((training$TARGET_FLAG))
+```
+
+Now that we have change the data type of each variable let;s check the structure again using `str()` function.
+
+```{r}
+str(training)
+```
+
+Now that our data type is in the right type so now we can goa head and re check the missing values and fix those
+
+```{r}
+
+knitr::kable(colSums(is.na(training)))
+```
+
+
+Now we can see in addition to previous columns or variables we have `HOME_VAL` with missing values too so in order to take care of missing values we will rely on mice package from R. Which have multiple techniques to take care of missing values. Since our data set has a mixture of continuous and categorical variables so we will consider a method that can handle both types and my personal pick would be to use random forest method to look at. Random forest can handle both data type plus it is an ensemble method which is a better approach to predict something.
+
+```{r warning=FALSE, message=FALSE}
+set.seed(2)
+training <- mice(training, m=5, maxit = 3, method = 'rf')
+training <- complete(training)
+
+```
+
+Now we can check our data set for any missing values.
+
+```{r}
+sum(is.na(training))
+```
+
+Now our data set is ready to train a model so let's go ahead with modeling section.
+
+## 3. BUILDING AND SELECTING MODELS : {.tabset}
+
+### LOGISTIC REGRESSION:
+
+#### BUILDING MODELS
+
+Let's Remove the `TARGET_AMT` column from out data set since that column contains the response for the cost of accidents so we are going to leave it out.
+
+```{r}
+training_log <- training[-2]
+```
+
+Now let's split the data into training and testing. We will split the data set `training_log` into `partial_train` and `validation`. `Partial_train` contains 85% of the data from `training_log` and the rest is in the `validation` that we will use for testing or evaluating the performance of our model.
+
+```{r}
+set.seed(42)
+split <- createDataPartition(training_log$TARGET_FLAG, p=.80, list=FALSE)
+partial_train <- training_log[split, ]
+validation <- training_log[ -split, ]
+```
+
+So now that our data has been split into two partitions now we can go ahead and create models. In our first model we will use all the variables in the data set  with 10 fold cross validation and see how the model performs
+
+##### MODEL 1:
+
+```{r}
+m1 <- train(TARGET_FLAG ~., data = partial_train, 
+              method = "glm", family = "binomial",
+              trControl = trainControl(
+                  method = "cv", number = 5,
+                  savePredictions = TRUE),
+              tuneLength = 5, 
+              preProcess = c("center", "scale"))
+```
+
+
+Here is the summary of our first model
+
+```{r}
+summary(m1)
+```
+
+Let's remove variables with higher P-values to create more models.
+
+##### MODEL 2:
+
+```{r}
+m2 <- train(TARGET_FLAG ~ KIDSDRIV + 
+                  PARENT1 + HOME_VAL + MSTATUS + INCOME + 
+                  TRAVTIME + CAR_USE + BLUEBOOK + TIF + CAR_TYPE  + OLDCLAIM + CLM_FREQ + REVOKED + MVR_PTS + URBANICITY, 
+              data = partial_train, 
+              method = "glm", family = "binomial",
+              trControl = trainControl(
+                  method = "cv", number = 10,
+                  savePredictions = TRUE),
+              tuneLength = 5, 
+              preProcess = c("center", "scale"))
+```
+
+let's look at the Variance inflation factor(VIF) of each predictor and remove the one with highest VIF.
+
+```{r}
+knitr::kable(vif(m2$finalModel))
+```
+
+
+Everything in the summary for model 2  above looks statistically significant but for our third model let's remove the predictors with high values for VIF.
+
+
+##### MODEL 3:
+
+```{r}
+
+m3 <- train(TARGET_FLAG ~ KIDSDRIV + 
+                  PARENT1  + MSTATUS + INCOME + 
+                  TRAVTIME + CAR_USE  + TIF   + OLDCLAIM + CLM_FREQ + REVOKED + MVR_PTS + URBANICITY,  
+              data = partial_train, 
+              method = "glm", family = "binomial",
+              trControl = trainControl(
+                  method = "cv", number = 10,
+                  savePredictions = TRUE),
+              tuneLength = 5, 
+              preProcess = c("center", "scale"))
+```
+
+```{r}
+summary(m3)
+```
+
+Again we can see that everything statistically significant in the model 3 so let;s move on to the selection models based on classification model metrics
+
+#### SELECTING MODEL:
+
+In this section we will look at different metrics like confusion matrix, specificity, sensitivity, F1 score, precision and AUC ROC and decide which model is the optimal one for the prediction. First we will look at the confusion matrix using four fold plot.
+
+
+```{r}
+pred1 <- predict(m1, newdata = validation)
+pred2 <- predict(m2, newdata = validation)
+pred3 <- predict(m3, newdata = validation)
+m1cM <- confusionMatrix(pred1, validation$TARGET_FLAG, 
+                        mode = "everything")
+m2cM <- confusionMatrix(pred2, validation$TARGET_FLAG, 
+                        mode = "everything")
+m3cM <- confusionMatrix(pred3, validation$TARGET_FLAG, 
+                        mode = "everything")
+par(mfrow=c(1,3))
+fourfoldplot(m1cM$table, color = c("#B22222", "#2E8B57"), main="Mod1")
+fourfoldplot(m2cM$table, color = c("#B22222", "#2E8B57"), main="Mod2")
+fourfoldplot(m3cM$table, color = c("#B22222", "#2E8B57"), main="Mod3")
+```
+
+As we can see that Model 2 has accuracy around 81% which is not bad considering it has very fewer predictor than Model 1. It has relatively higher accuracy than Model 3 which is around 77%. We can also look at other metrics before we decide on Model 2.
+
+```{r}
+eval <- data.frame(m1cM$byClass, 
+                   m2cM$byClass, 
+                   m3cM$byClass)
+eval <- data.frame(t(eval))
+
+eval <- dplyr::select(eval, Sensitivity, Specificity, Precision, Recall, F1)
+row.names(eval) <- c("Model 1", "Model 2", "Model 3")
+knitr::kable(eval)
+```
+
+Based on the metrics above again we will go with Model 2 since it has the highest F1 score and the reason why we are  making F1 score as basis for this data set is that the output or the response variable is imbalance and whenever one has an imbalance response variable it makes sense to make decision based on F1 score. We can also check out the ROC curve. Let's create a function for our ROC curve.
+
+```{r}
+getROC <- function(model) {
+    name <- deparse(substitute(model))
+    pred.prob1 <- predict(model, newdata = validation, type="prob")
+    p1 <- data.frame(pred = validation$TARGET_FLAG, prob = pred.prob1[[1]])
+    p1 <- p1[order(p1$prob),]
+    rocobj <- roc(p1$pred, p1$prob)
+    plot(rocobj, asp=NA, legacy.axes = TRUE, print.auc=TRUE,
+         xlab="Specificity", main = name)
+}
+
+
+```
+
+
+```{r warning=FALSE, message=FALSE}
+par(mfrow = c(1,3))
+getROC(m1)
+getROC(m2)
+getROC(m3)
+```
+
+
+Even though Model 2 does have a higher AUC as compared to Model 1 but we have to bear in mind that it uses fewer predictors which adds up while computing and it has higher accuracy and F1 score. So we will go with Model 2
+
+
+
+### MULTIPLE LINEAR REGRESSION:
+
+#### BUILDING MODELS:
+
+
+Let's Remove the `TARGET_FLAG` column from out data set since that column contains the response for the events of accidents so we are going to leave it out but before that we have fix our data type to fit into linear regression model. So let's fix our data type of column that has factors as data type and change into numeric by using label coding as shown below.
+
+
+```{r}
+training$PARENT1 <- as.numeric(as.factor(training$PARENT1))
+training$MSTATUS <- as.numeric(as.factor(training$MSTATUS))
+training$SEX <- as.numeric(as.factor(training$SEX))
+training$EDUCATION <- as.numeric(as.factor(training$EDUCATION))
+levels(training$EDUCATION) <- c('<High School','z_High School','Bachelors', 'Masters','PHD')
+training$CAR_USE <- as.numeric(as.factor(training$CAR_USE))
+training$CAR_TYPE <- as.numeric(as.factor(training$CAR_TYPE))
+training$RED_CAR <- as.factor(training$RED_CAR)
+training$REVOKED <- as.factor(training$REVOKED)
+training$URBANICITY <- as.factor(training$URBANICITY)
+training$JOB[training$JOB==""]<- NA
+training$JOB <- as.factor(training$JOB)
+```
+
+Now let's remove the unwanted column(s)
+
+```{r}
+training_lin <- training[-1]
+```
+
+Before moving on with our model let's check out the distribution for response variable in multiple linear regression
+
+```{r}
+
+hist(training_lin$TARGET_AMT)
+```
+
+
+Seems like the distribution is very favorable for linear regression and we would have to take some kind of transformation. Let's tro log transformation.
+
+```{r}
+logdata <- log1p(training_lin$TARGET_AMT)
+
+```
+
+Now checking the distribution again
+
+```{r}
+hist(logdata)
+```
+
+It looks much better now with a huge outlier sitting at 0 since the data set is hugely imbalance and there is nothing that could be done to cure that imbalance. Now let's split the data into training and testing. We will split the data set `training_log` into `partial_train` and `validation`. `Partial_train` contains 85% of the data from `training_log` and the rest is in the `validation` that we will use for testing or evaluating the performance of our model.
+
+```{r}
+set.seed(42)
+split <- createDataPartition(training_lin$TARGET_AMT, p=.80, list=FALSE)
+partial_train <- training_lin[split, ]
+validation <- training_lin[ -split, ]
+```
+
+We can feed the data to our model. Again just like logistic regression we will use 10 fold cross validation.
+
+##### MODEL 1:
+
+```{r}
+lm1 <- train(log1p(TARGET_AMT) ~ ., data = partial_train, 
+              method = "lm", 
+              trControl = trainControl(
+                  method = "cv", number = 10,
+                  savePredictions = TRUE),
+              tuneLength = 5, 
+              preProcess = c("center", "scale"))
+```
+
+Let's check out the summary of our model
+
+```{r}
+summary(lm1)
+```
+
+
+As we can see that a lot predictors are very insignificant in our model so let's get rid of those predictors
+
+##### MODEL 2:
+
+```{r}
+lm2 <- train(log1p(TARGET_AMT) ~ KIDSDRIV+ MSTATUS+ CAR_TYPE+ JOB+ HOME_VAL+PARENT1+ BLUEBOOK  + CLM_FREQ + REVOKED + OLDCLAIM, data = partial_train, 
+              method = "lm", 
+              trControl = trainControl(
+                  method = "cv", number = 10,
+                  savePredictions = TRUE),
+              tuneLength = 5, 
+              preProcess = c("center", "scale"))
+```
+
+Let's check out the multi co-linearity among model's predictors.
+
+```{r}
+knitr::kable(vif(lm2$finalModel))
+```
+
+
+And significance of the predictors:
+
+```{r}
+summary(lm2)
+```
+
+#### SELECTING MODEL:
+
+```{r}
+df <- data.frame()
+df <- rbind(df, lm1$results)
+df <- rbind(df, lm2$results)
+
+df$intercept <- c("Mod1", "Mod2")
+colnames(df)[1] <- "model"
+knitr::kable(df)
+```
+
+
+Even though model 1 which is `lm1` has a lot of predictors we will still choose that because we get a much higher adjusted $R^2$. Similarly MSE and MAE are also low for our model 1
+
+
+## 4. EVALUATION {.tabset}
+
+In this section we make predictions using the evaluation data provided. Before w make prediction we have to work on changing the data type and deal with missing values in any in our evaluation data set. Before any further due let's upload the data set in our environment.
+
+```{r warning=FALSE, message=FALSE}
+testing <- read_csv("https://raw.githubusercontent.com/Umerfarooq122/predicting-the-probability-that-a-person-will-crash-their-car-and-also-the-amount-cost/main/insurance-evaluation-data.csv")
+```
+
+```{r}
+knitr::kable(head(testing))
+```
+
+
+```{r}
+testing <- testing[,-(1:3)]
+```
+
+```{r}
+str(testing)
+```
+
+```{r}
+
+testing$INCOME <- parse_number(testing$INCOME)
+testing$HOME_VAL <- parse_number(testing$HOME_VAL)
+testing$BLUEBOOK <- parse_number(testing$BLUEBOOK)
+testing$OLDCLAIM <- parse_number(testing$OLDCLAIM)
+```
+
+Now that we have changed those columns now we can set the data type for other character and convert them into factors which a much more acceptable data type when it comes to logistic regression.
+
+```{r}
+testing$PARENT1 <- as.factor(testing$PARENT1)
+testing$MSTATUS <- as.factor(testing$MSTATUS)
+testing$SEX <- as.factor(testing$SEX)
+testing$EDUCATION <- as.factor(testing$EDUCATION)
+levels(testing$EDUCATION) <- c('<High School','z_High School','Bachelors', 'Masters','PHD')
+testing$CAR_USE <- as.factor(testing$CAR_USE)
+testing$CAR_TYPE <- as.factor(testing$CAR_TYPE)
+testing$RED_CAR <- as.factor(testing$RED_CAR)
+testing$REVOKED <- as.factor(testing$REVOKED)
+testing$URBANICITY <- as.factor(testing$URBANICITY)
+testing$JOB[testing$JOB==""]<- NA
+testing$JOB <- as.factor(testing$JOB)
+
+```
+
+
+```{r}
+colSums(is.na(testing))
+```
+
+```{r}
+set.seed(2)
+testing <- mice(testing, m=5, maxit = 3, method = 'rf')
+testing <- complete(testing)
+```
+
+
+
+### LOGISTIC REGRESSION:
+
+```{r}
+logpred <- predict(m2, testing)
+logpred_prob <- predict(m2, testing, type = "prob")
+log_df <- cbind(logpred_prob, TARGET_FLAG = logpred)
+```
+
+```{r}
+log_df <- log_df%>%
+  rename(prob=2)
+```
+
+
+### MUTIPLE LINEAR REGRESSION:
+
+
+
+
+```{r}
+#fixing data type
+testing$PARENT1 <- as.numeric(as.factor(testing$PARENT1))
+testing$MSTATUS <- as.numeric(as.factor(testing$MSTATUS))
+testing$CAR_TYPE <- as.numeric(as.factor(testing$CAR_TYPE))
+testing$SEX <- as.numeric(as.factor(testing$SEX))
+testing$EDUCATION <- as.numeric(as.factor(testing$EDUCATION))
+testing$CAR_USE <- as.numeric(as.factor(testing$CAR_USE))
+
+```
+
+```{r}
+# predicting
+amountpred <- exp(predict(lm1, testing))
+```
+
+```{r}
+final <- cbind(log_df, TARGET_AMT = amountpred)
+
+knitr::kable(head(final))
+```
+
+Now to confirm that our model is actually predicting higher costs if the probability of accidents increases so we can plot them against each to confirm our models 
+
+```{r}
+
+ggplot(data = final,  mapping = aes(x= prob, y = TARGET_AMT)) +
+  geom_point(color = "blue", size = 3)+labs(x="Predicted Probability of Accident Happening", y="Cost")+theme_bw()
+```
+
+
+## 5. CONCLUSION:
+
+In this study we were dealing with an imbalance dataset and our job was to find out what contributes towards car crash and how much would it cost for the repair. The Data set provided had 26 variables and around 8k observations. We started our analysis with exploring the data set followed by cleaning and preparing the data set for training our models. We had to come up with two models i.e. one for classification and one for regression. For classification we use a logistic regression with 10 fold cross validation and trained three models. Since it was imbalance data set so the model with highest F1 score was chosen for the final predictions. For predicting the cost of an accident we formulated two regression models and pick the best one based one Mean absolute error and Mean Squared Error. Our predictions were not that accurate when it came to the cost of the accidents but our model predicted higher `TARGET_AMT` every time we had higher predicted probability of accident
+
+
+
+
+
